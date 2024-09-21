@@ -13,6 +13,8 @@ import torchvision.transforms as transforms
 
 import numpy as np
 import time
+import random
+from collections import deque
 
 # API: def model_action
 #      def model_newState
@@ -37,30 +39,9 @@ class MyModel(nn.Module):
             
         x = self.outputs(x)
         return x
-    
-
-class myDataset(Dataset):
-    def __init__(self, inputs, outputs, transform=None):
-        self.inputs = torch.tensor(np.array(inputs), dtype=torch.float32)
-        self.outputs = torch.tensor(np.array(outputs), dtype=torch.float32)
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.inputs)
-    
-    def __getitem__(self, idx):
-        input_data = self.inputs[idx]
-        output_data = self.outputs[idx]
-
-        # if self.transform:
-            # input_data = self.transform(input_data)
-            # actions = self.transform(actions)
-
-        return input_data, output_data
-    
 
 # target_q_values = rewards + (gamma * next_q_values * (1 - dones))
-class RL_model:
+class model:
     def __init__(self, inputs, outputs, layers, epochs, batch_size):
         self.inputs = inputs
         self.outputs = outputs
@@ -68,153 +49,163 @@ class RL_model:
         self.epochs = 1
         self.batch_size = 64
         self.val_impossibleActs = -3
-        self.model = None
         self.k = 0
+        self.learning_rate = 0.001
+
+        self.model = None
+        self.target_model = None
 
         self.buffer_qTable = []
-        self.len_buffer = 64
-        self.k_reward = 0.55
-        self.standart_reward = 1
-        self.temperature = 0.1
-        self.start_elipson = 1.0
-        self.k_reduce_elipson = 0.995
-        self.gamma = 0.995
+        self.len_buffer = 1000
+        self.k_reward = 0.15
+        # self.standart_reward = 0.5
+        self.temperature = 1
+        self.epsilon = 1.0
+        self.epsilon_decay = 0.98
+        self.epsilon_min = 0.01
+        self.gamma = 0.99
+
+        self.memory = deque(maxlen=self.len_buffer)
+        self.reward_for_done = -5
+        self.episode = 0
+        self.target_update = 10
+        self.loss = 0.0
 
         self.build_model()
 
-    def choiceAction(self, state, possible_acts):
+    def chooseAction(self, state, possible_acts):
         # Выбираем рандомное действие
-        if 0.0 < np.random.random() < self.elipson:
-            return np.random.randint(0, len(possible_acts))
+        if np.random.random() < self.epsilon:
+            return np.random.choice(possible_acts)
 
-        arr_possible_acts = self.categorical_possible_acts(possible_acts)
-        inputs = torch.from_numpy(np.array(state)).float().unsqueeze(0)
+        arr_possible_acts = self.to_categorical(possible_acts)
+        inputs = torch.from_numpy(np.array(state, dtype=np.float32)).unsqueeze(0)
 
         inputs = inputs.to(self.device)
         with torch.no_grad():
             output = self.model(inputs)
         output = output.to("cpu")
+        output = np.reshape(output, self.outputs[0])
 
         for i in range(len(output)):
-            if not(arr_possible_acts[i]):
-                output[i] = 0
+            if arr_possible_acts[i] == 0:
+                output[i] = -np.inf
 
-        probabilities = F.softmax(output / self.temperature, dim=-1).detach().numpy()
+        probabilities = torch.softmax(output / self.temperature, dim=-1).detach().numpy()
         probabilities = np.reshape(probabilities, self.outputs[0])
         
         chosen_index = np.random.choice(len(probabilities), p=probabilities)
-
         return chosen_index
     
     # q_table: (state, act, reward, possible_acts)
-    def trainStep(self, next_state, action, reward, possible_acts):
-        st = time.perf_counter()
-        self.buffer_qTable.append([np.array(next_state), action, reward, np.array(possible_acts)])
+    def trainStep(self, state, action, reward, next_state, done, possibleActs):
+        # st = time.perf_counter()
+        if done:
+            self.episode += 1
+            reward = self.reward_for_done
 
-        if len(self.buffer_qTable) < self.len_buffer:
+            print(f"Episode: {self.episode} Loss: {self.loss:.4f} Elipson: {self.epsilon:.2f}")
+
+            # Обновление целевой сети
+            if self.episode % self.target_update == 0:
+                self.target_model.load_state_dict(self.model.state_dict())
+            
+            # Обновляем epsilon
+            if self.epsilon > self.epsilon_min:
+                self.epsilon *= self.epsilon_decay
+
+        possibleActs = self.to_categorical(possibleActs)
+        self.memory.append((np.array(state), action, reward, np.array(next_state), done, possibleActs))
+
+        if len(self.memory) < self.len_buffer:
             return
         
-        qTable = self.preprocessing_qTable(self.buffer_qTable)
-        self.train_model(qTable)
-
-        self.buffer_qTable = []
-        print(f"Общее время: {time.perf_counter() - st}\n")
-
-    def train_model(self, q_table):
-        input_data, output_data = self.preprocess_dataset(q_table)
-
-        train_dataset = self.cache_dataset(input_data, output_data)
-        st2 = time.perf_counter()
-        gpu_data_buffer = self.loadDataset2GPU(train_dataset)
-        print("Загрузка на видеокарту: ", time.perf_counter() - st2)
-
-        self.new_model = self.training_model(gpu_data_buffer)
-
-    def training_model(self, gpu_data_buffer):
-        for epoch in range(self.epochs):
-            for batch_idx, (input_data, labels, actions) in enumerate(gpu_data_buffer):
-
-                # Q(s, a)
-                q_values = self.model(input_data)
-                q_values = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)
-
-                # Q(s', a') для целевой сети
-                next_q_values = self.target_model(next_states).max(1)[0]
-                target_q_values = rewards + (gamma * next_q_values * (1 - dones))
-
-
-                loss = self.criterion(outputs, labels)
-
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
-
-                # if (batch_idx + 1) % self.batch_size == 0:
-            print(f"Epoch [{epoch+1}/{self.epochs}], Loss: {loss.item():.4f}")
+        # st = time.perf_counter()
         
-        self.unloadDatasetFromGPU(gpu_data_buffer)
-        return self.model
-    
-    def preprocessing_qTable(self, qTable):
-        for i in range(-2, -len(qTable), -1):
-            if qTable[i][2] == self.standart_reward:
-                qTable[i][2] += self.k_reward * (qTable[i + 1][2] - self.standart_reward)
+        batch = random.sample(self.memory, self.batch_size)
+        states, actions, rewards, next_states, dones, possibleActs = zip(*batch)
 
-        return qTable
+        # Объединение всех тензоров на CPU
+        states = torch.FloatTensor(np.array(states)).to(self.device)
+        actions = torch.LongTensor(actions).to(self.device)  # actions можно оставить как LongTensor
+        rewards = torch.FloatTensor(rewards).to(self.device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+        dones = torch.FloatTensor(dones).to(self.device)
+        possibleActs = torch.FloatTensor(np.array(possibleActs)).to(self.device)
 
-    def cache_dataset(self, input_data, output_data):
-        train_dataset = myDataset(input_data, output_data, transform=None)
-        data_loader = DataLoader(dataset=train_dataset,
-                                 batch_size=self.batch_size, 
-                                 shuffle=True,
-                                 pin_memory=True,
-                                 num_workers=2, 
-                                 persistent_workers=True)
-        return data_loader
+        # Перемещение на GPU за один вызов
+        states, next_states, possibleActs, actions, rewards, dones = [
+            x.to(self.device) for x in (states, next_states, possibleActs, actions, rewards, dones)
+        ]
+
+        # print(time.perf_counter() - st)
+
+        # batch_list = [zip(*batch)]
+
+        # arr = np.array(batch_list)
+        # dataset = torch.FloatTensor(np.array(batch_list))
+
+        # arr_rewards = np.zeros((self.batch_size, self.outputs[0]), dtype=np.float32)
+        # for i in range(self.batch_size):
+        #     arr_rewards[i][actions[i]] = rewards[i]
+        
+        # states = torch.FloatTensor(np.array(states)).to(self.device)
+        # actions = torch.LongTensor(actions).to(self.device)
+        # rewards = torch.FloatTensor(rewards).to(self.device)
+        # next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+        # dones = torch.FloatTensor(dones).to(self.device)
+        # possibleActs = torch.FloatTensor(np.array(possibleActs)).to(self.device)
+
+        # target_q_values = torch.zeros((self.batch_size, self.outputs[0]), dtype=torch.float32).to(self.device)
+
+
+        # Q(s, a)
+        # q_values = self.model(states)
+        # next_q_values = self.target_model(next_states).max(1)[0]
+
+        # target_q_values = q_values.clone()
+
+        # print(f"\ntarget_q_values {target_q_values.shape}\nactions {actions.shape}\narr_rewards {rewards.shape}\nnext_q_values {next_q_values.shape}\ndones {dones.shape}\npossibleActs {possibleActs.shape}\n")
+
+        # for i in range(self.batch_size):
+        #     target_q_values[i][actions[i]] = (rewards[i] + (self.gamma * next_q_values[i] * (1 - dones[i])))
+        # for i in range(self.batch_size):
+        #     target_q_values[i] *= possibleActs[i] + (1 - possibleActs[i]) * self.val_impossibleActs
+
+        # Q(s, a)
+        q_values = self.model(states)
+        next_q_values = self.target_model(next_states).max(1)[0]
+
+        # Изменение целевых Q-значений для всех действий за один вызов
+        target_q_values = q_values.clone()
+
+        # Индексация для всех действий одновременно
+        target_q_values[range(self.batch_size), actions] = rewards + (self.gamma * next_q_values * (1 - dones))
+
+        # Учет возможных и невозможных действий
+        target_q_values = target_q_values * possibleActs + (1 - possibleActs) * self.val_impossibleActs
+        
+        # print(f"{q_values[10]}   {target_q_values[10]}")
+        self.loss = nn.MSELoss()(q_values, target_q_values)
+        self.optimizer.zero_grad()
+        self.loss.backward()
+        self.optimizer.step()
+
+        # print(f"Общее время: {time.perf_counter() - st}\n")
 
     def build_model(self):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model = MyModel(inputs=self.inputs, outputs=self.outputs, layers=self.layers).to(self.device)
 
-        self.optimizer = torch.optim.Adam(self.model.parameters())
+        self.model = MyModel(inputs=self.inputs, outputs=self.outputs, layers=self.layers).to(self.device)
+        self.target_model = MyModel(inputs=self.inputs, outputs=self.outputs, layers=self.layers).to(self.device)
+        self.target_model.load_state_dict(self.model.state_dict())
+
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         self.criterion = nn.MSELoss()
 
-        self.writer = SummaryWriter(log_dir='./log_dir')
-
-    def loadDataset2GPU(self, train_dataset):
-        gpu_data_buffer = []
-        for input_data, labels in train_dataset:
-            gpu_data_buffer.append((input_data.cuda(non_blocking=True), labels.cuda(non_blocking=True)))
-
-        return gpu_data_buffer
-    
-    def unloadDatasetFromGPU(self, gpu_data_buffer):
-        del gpu_data_buffer
-        torch.cuda.empty_cache()
-
-
-    # input_data: (state)
-    # output_data: (acts and rewards)
-    def preprocess_dataset(self, q_table):
-        input_data = [arr[0] for arr in q_table]
-        output_data = []
-
-        for i in range(len(q_table)):
-            arr_possible_acts = self.categorical_possible_acts(q_table[i][3])
-            out_reward = ((self._to_categorical(q_table[i][1])) * q_table[i][2])
-            impossible_reward = ((1 - arr_possible_acts) * self.val_impossibleActs)
-            output_data.append(out_reward + impossible_reward)
-
-        return input_data, output_data
-
-    def categorical_possible_acts(self, possible_acts):
-        arr_possible_acts = np.full(self.outputs[0], 0)
-        for act in possible_acts:
-            arr_possible_acts += self._to_categorical(act)
+    def to_categorical(self, arr):
+        arr_possible_acts = np.full(self.outputs[0], 0, dtype=np.int8)
+        for i in range(len(arr)):
+            arr_possible_acts[arr[i]] = 1
         
         return arr_possible_acts
-
-    def _to_categorical(self, num):
-        result = np.full(self.outputs[0], 0, dtype=np.int8)
-        result[num] = 1
-        return result
