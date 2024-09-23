@@ -1,18 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision import transforms
-from torch.utils.data import Dataset, DataLoader, TensorDataset
-
-import torch
-import torch.nn as nn
 import torch.profiler
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
-import torchvision.transforms as transforms
 
 import numpy as np
-import time
 import random
 from collections import deque
 
@@ -76,7 +67,6 @@ class model:
         self.build_model()
 
     def chooseAction(self, state, possible_acts):
-        # Выбираем рандомное действие
         if np.random.random() < self.epsilon:
             return np.random.choice(possible_acts)
 
@@ -101,20 +91,17 @@ class model:
     
     # q_table: (state, act, reward, possible_acts)
     def trainStep(self, state, action, reward, next_state, done, possibleActs):
-        # st = time.perf_counter()
         self.iteration += 1
-        if done: # self.iteration % self.done_steps == 0
+        if done:
             self.iteration = 0
             self.episode += 1
             reward = self.reward_for_done
 
             print(f"Episode: {self.episode} Loss: {self.loss:.4f} Elipson: {self.epsilon:.2f}")
 
-            # Обновление целевой сети
             if self.episode % self.target_update == 0:
                 self.target_model.load_state_dict(self.model.state_dict())
             
-            # Обновляем epsilon
             if self.epsilon > self.epsilon_min:
                 self.epsilon *= self.epsilon_decay
 
@@ -127,7 +114,6 @@ class model:
         batch = random.sample(self.memory, self.batch_size)
         states, actions, rewards, next_states, dones, possibleActs = zip(*batch)
 
-        # Объединение всех тензоров на CPU
         states = torch.FloatTensor(np.array(states))
         actions = torch.LongTensor(actions)
         rewards = torch.FloatTensor(rewards)
@@ -135,31 +121,23 @@ class model:
         dones = torch.FloatTensor(dones)
         possibleActs = torch.FloatTensor(np.array(possibleActs))
 
-        # Перемещение на GPU за один вызов
         states, next_states, possibleActs, actions, rewards, dones = [
             x.to(self.device) for x in (states, next_states, possibleActs, actions, rewards, dones)
         ]
 
-        # Q(s, a)
         q_values = self.model(states)
         next_q_values = self.target_model(next_states).max(1)[0]
 
-        # Изменение целевых Q-значений для всех действий за один вызов
         target_q_values = q_values.clone()
 
-        # Индексация для всех действий одновременно
         target_q_values[range(self.batch_size), actions] = rewards + (self.gamma * next_q_values * (1 - dones))
 
-        # Учет возможных и невозможных действий
         target_q_values = target_q_values * possibleActs + (1 - possibleActs) * self.val_impossibleActs
         
-        # print(f"{q_values[10]}   {target_q_values[10]}")
         self.loss = nn.MSELoss()(q_values, target_q_values)
         self.optimizer.zero_grad()
         self.loss.backward()
         self.optimizer.step()
-
-        # print(f"Общее время: {time.perf_counter() - st}\n")
 
     def build_model(self):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
