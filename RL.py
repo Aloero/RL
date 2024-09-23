@@ -61,14 +61,16 @@ class model:
         # self.standart_reward = 0.5
         self.temperature = 1
         self.epsilon = 1.0
-        self.epsilon_decay = 0.98
+        self.epsilon_decay = 0.9
         self.epsilon_min = 0.01
         self.gamma = 0.99
+        self.done_steps = 100
+        self.iteration = 0
 
         self.memory = deque(maxlen=self.len_buffer)
-        self.reward_for_done = -5
+        self.reward_for_done = 10
         self.episode = 0
-        self.target_update = 10
+        self.target_update = 1
         self.loss = 0.0
 
         self.build_model()
@@ -100,7 +102,9 @@ class model:
     # q_table: (state, act, reward, possible_acts)
     def trainStep(self, state, action, reward, next_state, done, possibleActs):
         # st = time.perf_counter()
-        if done:
+        self.iteration += 1
+        if done: # self.iteration % self.done_steps == 0
+            self.iteration = 0
             self.episode += 1
             reward = self.reward_for_done
 
@@ -117,60 +121,24 @@ class model:
         possibleActs = self.to_categorical(possibleActs)
         self.memory.append((np.array(state), action, reward, np.array(next_state), done, possibleActs))
 
-        if len(self.memory) < self.len_buffer:
+        if len(self.memory) < self.batch_size:
             return
-        
-        # st = time.perf_counter()
         
         batch = random.sample(self.memory, self.batch_size)
         states, actions, rewards, next_states, dones, possibleActs = zip(*batch)
 
         # Объединение всех тензоров на CPU
-        states = torch.FloatTensor(np.array(states)).to(self.device)
-        actions = torch.LongTensor(actions).to(self.device)  # actions можно оставить как LongTensor
-        rewards = torch.FloatTensor(rewards).to(self.device)
-        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
-        dones = torch.FloatTensor(dones).to(self.device)
-        possibleActs = torch.FloatTensor(np.array(possibleActs)).to(self.device)
+        states = torch.FloatTensor(np.array(states))
+        actions = torch.LongTensor(actions)
+        rewards = torch.FloatTensor(rewards)
+        next_states = torch.FloatTensor(np.array(next_states))
+        dones = torch.FloatTensor(dones)
+        possibleActs = torch.FloatTensor(np.array(possibleActs))
 
         # Перемещение на GPU за один вызов
         states, next_states, possibleActs, actions, rewards, dones = [
             x.to(self.device) for x in (states, next_states, possibleActs, actions, rewards, dones)
         ]
-
-        # print(time.perf_counter() - st)
-
-        # batch_list = [zip(*batch)]
-
-        # arr = np.array(batch_list)
-        # dataset = torch.FloatTensor(np.array(batch_list))
-
-        # arr_rewards = np.zeros((self.batch_size, self.outputs[0]), dtype=np.float32)
-        # for i in range(self.batch_size):
-        #     arr_rewards[i][actions[i]] = rewards[i]
-        
-        # states = torch.FloatTensor(np.array(states)).to(self.device)
-        # actions = torch.LongTensor(actions).to(self.device)
-        # rewards = torch.FloatTensor(rewards).to(self.device)
-        # next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
-        # dones = torch.FloatTensor(dones).to(self.device)
-        # possibleActs = torch.FloatTensor(np.array(possibleActs)).to(self.device)
-
-        # target_q_values = torch.zeros((self.batch_size, self.outputs[0]), dtype=torch.float32).to(self.device)
-
-
-        # Q(s, a)
-        # q_values = self.model(states)
-        # next_q_values = self.target_model(next_states).max(1)[0]
-
-        # target_q_values = q_values.clone()
-
-        # print(f"\ntarget_q_values {target_q_values.shape}\nactions {actions.shape}\narr_rewards {rewards.shape}\nnext_q_values {next_q_values.shape}\ndones {dones.shape}\npossibleActs {possibleActs.shape}\n")
-
-        # for i in range(self.batch_size):
-        #     target_q_values[i][actions[i]] = (rewards[i] + (self.gamma * next_q_values[i] * (1 - dones[i])))
-        # for i in range(self.batch_size):
-        #     target_q_values[i] *= possibleActs[i] + (1 - possibleActs[i]) * self.val_impossibleActs
 
         # Q(s, a)
         q_values = self.model(states)
